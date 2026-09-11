@@ -1,0 +1,127 @@
+.bam-tab-strip {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 8px;
+    background: #17181a;
+    padding: 6px 8px 0 8px;
+    flex-shrink: 0;
+}
+
+.bam-tab-list {
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    overflow-x: auto;
+    min-width: 0;
+}
+
+.bam-tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: #2b2c2f;
+    color: #9aa0a6;
+    padding: 8px 8px 8px 14px;
+    border-radius: 8px 8px 0 0;
+    cursor: pointer;
+    white-space: nowrap;
+    max-width: 240px;
+    transition: background 0.12s ease, color 0.12s ease;
+}
+
+.bam-tab:hover:not(.active) {
+    background: #333438;
+    color: #c7c9cc;
+}
+
+.bam-tab.active {
+    background: #1e1e1e;
+    color: #f1f3f4;
+}
+
+.bam-tab.has-error:not(.active) {
+    color: #e08a8a;
+}
+
+.bam-tab-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: block;
+}
+
+.bam-tab-close {
+    appearance: none;
+    border: none;
+    background: transparent;
+    color: inherit;
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    cursor: pointer;
+    opacity: 0.7;
+}
+
+.bam-tab-close:hover {
+    opacity: 1;
+    background: rgba(255, 255, 255, 0.12);
+}
+
+.bam-tab-add {
+    appearance: none;
+    border: none;
+    background: transparent;
+    color: #9aa0a6;
+    width: 26px;
+    height: 26px;
+    margin-bottom: 2px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.bam-tab-add:hover {
+    color: #f1f3f4;
+    background: #2b2c2f;
+}
+
+.bam-view-toggle {
+    display: flex;
+    gap: 2px;
+    padding: 3px;
+    margin-bottom: 4px;
+    background: #2b2c2f;
+    border-radius: 6px;
+    flex-shrink: 0;
+}
+
+.bam-view-toggle-btn {
+    appearance: none;
+    border: none;
+    background: transparent;
+    color: #9aa0a6;
+    width: 26px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.bam-view-toggle-btn:hover {
+    color: #f1f3f4;
+    background: #38393d;
+}
+
+.bam-view-toggle-btn.active {
+    color: #ffffff;
+    background: #4c9eff;
+}
