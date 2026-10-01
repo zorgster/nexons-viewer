@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Oliver Slay and Simon Andrews
+// SPDX-License-Identifier: GPL-3.0-only
+
 import type { ExonGene } from "./types";
 
 export interface GtfWorkerRequest {

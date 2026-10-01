@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Oliver Slay and Simon Andrews
+// SPDX-License-Identifier: GPL-3.0-only
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { BaiRefIndex, BamRecord, ExonGene } from "./types";
 import { parseBAMHeader, readBAI, fetchRegionRecords } from "./bamIo";
@@ -6,6 +9,11 @@ import Header, { type LayoutMode } from "./components/Header";
 import Legend from "./components/Legend";
 import GeneTabs, { type GeneTab } from "./components/GeneTabs";
 import AlignmentPanel from "./components/AlignmentPanel";
+import {
+    rankTranscriptsAcrossPanels,
+    transcriptsMeetingMinimumReadCount,
+    type TranscriptSortMode,
+} from "./transcriptSort";
 import "./App.css";
 
 interface BamSource {
@@ -70,11 +78,9 @@ export default function App() {
     const [activeTabId, setActiveTabId] = useState<string | null>(null);
     const [addressBarOpen, setAddressBarOpen] = useState(false);
     const [sharedView, setSharedView] = useState<{ start: number; end: number } | null>(null);
-
-    // Density-track peaks reported by each panel slot (per transcript id), merged across slots
-    // so the same transcript scales identically no matter which panel it's viewed in.
-    const [peaksBySlot, setPeaksBySlot] = useState<Map<number, Map<string, number>>>(new Map());
-    const peaksCallbacksRef = useRef<Map<number, (peaks: Map<string, number>) => void>>(new Map());
+    const [transcriptSortMode, setTranscriptSortMode] = useState<TranscriptSortMode>("name");
+    const [lockedMinimumReadCount, setLockedMinimumReadCount] = useState(0);
+    const [slotMinimumReadCounts, setSlotMinimumReadCounts] = useState(() => Array<number>(SLOT_COUNT).fill(0));
 
     const queryTokensRef = useRef<Map<string, number>>(new Map());
 
@@ -257,8 +263,19 @@ export default function App() {
     }, []);
 
     const toggleSlotLock = useCallback((slotIndex: number) => {
+        if (slots[slotIndex]?.locked) {
+            setSlotMinimumReadCounts((prev) => prev.map((value, i) => i === slotIndex ? lockedMinimumReadCount : value));
+        }
         setSlots((prev) => prev.map((slot, i) => (i === slotIndex ? { ...slot, locked: !slot.locked } : slot)));
-    }, []);
+    }, [slots, lockedMinimumReadCount]);
+
+    const handleMinimumReadCountChange = useCallback((slotIndex: number, value: number) => {
+        if (slots[slotIndex]?.locked) {
+            setLockedMinimumReadCount(value);
+        } else {
+            setSlotMinimumReadCounts((prev) => prev.map((current, i) => i === slotIndex ? value : current));
+        }
+    }, [slots]);
 
     const handlePanelViewChange = useCallback((slotIndex: number, next: { start: number; end: number }) => {
         setSlots((prev) => {
@@ -266,33 +283,6 @@ export default function App() {
             return prev;
         });
     }, []);
-
-    const handlePeaksChange = useCallback((slotIndex: number, peaks: Map<string, number>) => {
-        setPeaksBySlot((prev) => {
-            const next = new Map(prev);
-            next.set(slotIndex, peaks);
-            return next;
-        });
-    }, []);
-
-    // Stable per-slot callback identity (AlignmentCanvas only re-reports peaks when its own
-    // values change, so this doesn't need to change every render to avoid a report/re-render loop).
-    function getPeaksCallback(slotIndex: number) {
-        let fn = peaksCallbacksRef.current.get(slotIndex);
-        if (!fn) {
-            fn = (peaks: Map<string, number>) => handlePeaksChange(slotIndex, peaks);
-            peaksCallbacksRef.current.set(slotIndex, fn);
-        }
-        return fn;
-    }
-
-    const sharedPeaks = useMemo(() => {
-        const merged = new Map<string, number>();
-        for (const peaks of peaksBySlot.values()) {
-            for (const [id, v] of peaks) merged.set(id, Math.max(merged.get(id) ?? 0, v));
-        }
-        return merged;
-    }, [peaksBySlot]);
 
     const currentGeneId = tabs.find((t) => t.id === activeTabId)?.geneId ?? null;
 
@@ -313,9 +303,85 @@ export default function App() {
     }, [currentGeneId, slots, layoutMode, sources, exonIndexById]);
 
     const currentGene = currentGeneId ? exonIndexById.get(currentGeneId) ?? null : null;
+
+    const lockedTranscriptOrder = useMemo(() => {
+        if (!currentGene || !currentGeneId || transcriptSortMode !== "readCount") return null;
+
+        const lockedSlots = slots
+            .slice(0, layoutMode)
+            .filter((slot): slot is PanelSlot & { sourceId: string } => slot.locked && slot.sourceId !== null);
+
+        if (lockedSlots.length <= 1) return null;
+
+        const panelRecords = lockedSlots.map((slot) => {
+            const source = sources.find((candidate) => candidate.id === slot.sourceId);
+            return source?.ready && source.queriedGeneId === currentGeneId && source.records
+                ? source.records
+                : [];
+        });
+
+        return rankTranscriptsAcrossPanels(currentGene.transcripts, panelRecords);
+    }, [currentGene, currentGeneId, transcriptSortMode, slots, layoutMode, sources]);
+
+    const lockedVisibleTranscriptIds = useMemo(() => {
+        if (!currentGene || !currentGeneId) return null;
+
+        const lockedSlots = slots
+            .slice(0, layoutMode)
+            .filter((slot): slot is PanelSlot & { sourceId: string } => slot.locked && slot.sourceId !== null);
+
+        if (lockedSlots.length === 0) return null;
+
+        const panelRecords = lockedSlots.map((slot) => {
+            const source = sources.find((candidate) => candidate.id === slot.sourceId);
+            return source?.ready && source.queriedGeneId === currentGeneId && source.records
+                ? source.records
+                : [];
+        });
+
+        return transcriptsMeetingMinimumReadCount(currentGene.transcripts, panelRecords, lockedMinimumReadCount);
+    }, [currentGene, currentGeneId, lockedMinimumReadCount, slots, layoutMode, sources]);
+
+    useEffect(() => {
+        if (!currentGene || !currentGeneId) return;
+
+        const lockedSources = slots
+            .slice(0, layoutMode)
+            .filter((slot) => slot.locked && slot.sourceId !== null)
+            .map((slot) => sources.find((source) => source.id === slot.sourceId))
+            .filter((source): source is BamSource => !!source && source.ready);
+
+        if (lockedSources.length <= 1) return;
+        const settled = lockedSources.every((source) =>
+            source.queriedGeneId === currentGeneId
+            && !source.queryLoading
+            && (source.records !== null || source.queryError !== null)
+        );
+        if (!settled) return;
+
+        let start = currentGene.start - 1;
+        let end = currentGene.end;
+        for (const source of lockedSources) {
+            for (const record of source.records ?? []) {
+                if (record.start < start) start = record.start;
+                if (record.end > end) end = record.end;
+            }
+        }
+
+        const pad = Math.max(200, Math.round((end - start) * 0.05));
+        setSharedView({ start: start - pad, end: end + pad });
+    }, [currentGene, currentGeneId, slots, layoutMode, sources]);
+
     const visibleSlotCount = layoutMode;
     const assignedCount = slots.slice(0, visibleSlotCount).filter((s) => s.sourceId !== null).length;
     const sourceOptions = useMemo(() => sources.map((s) => ({ id: s.id, label: s.label })), [sources]);
+    const onboardingStep = exonIndexById.size === 0
+        ? "gtf"
+        : !anyBamReady
+            ? "bam"
+            : tabs.length === 0
+                ? "gene"
+                : null;
 
     function renderSlot(slotIndex: number) {
         const slot = slots[slotIndex];
@@ -333,9 +399,13 @@ export default function App() {
                 exonIndexById={exonIndexById}
                 locked={slot.locked}
                 sharedView={sharedView}
+                transcriptSortMode={transcriptSortMode}
+                onTranscriptSortModeChange={setTranscriptSortMode}
+                transcriptOrder={slot.locked ? lockedTranscriptOrder : null}
+                minimumReadCount={slot.locked ? lockedMinimumReadCount : slotMinimumReadCounts[slotIndex]}
+                onMinimumReadCountChange={(value) => handleMinimumReadCountChange(slotIndex, value)}
+                visibleTranscriptIds={slot.locked ? lockedVisibleTranscriptIds : null}
                 onViewChange={(v) => handlePanelViewChange(slotIndex, v)}
-                sharedPeaks={sharedPeaks}
-                onPeaksChange={getPeaksCallback(slotIndex)}
                 onToggleLock={() => toggleSlotLock(slotIndex)}
                 showLock={assignedCount > 1}
             />
@@ -348,6 +418,7 @@ export default function App() {
                 exonFileName={exonFileName}
                 gtfProgress={gtfProgress}
                 bamFileLabel={bamFileLabel}
+                onboardingStep={onboardingStep === "gtf" || onboardingStep === "bam" ? onboardingStep : null}
                 status={status}
                 tslLevel={tslLevel}
                 onTslLevelChange={handleTslLevelChange}
@@ -364,6 +435,7 @@ export default function App() {
                 addressBarOpen={addressBarOpen}
                 exonIndexById={exonIndexById}
                 exonIndexReady={exonIndexById.size > 0}
+                showAddGeneHint={onboardingStep === "gene"}
                 onSelectTab={handleSelectTab}
                 onCloseTab={handleCloseTab}
                 onOpenAddressBar={handleOpenAddressBar}
@@ -379,13 +451,33 @@ export default function App() {
                 </div>
             ) : (
                 <div id="placeholder">
-                    Load a GTF (optionally filtered by transcript support level) to get an instant, searchable gene
-                    list with coordinates. Then load one or more BAM files together with their .bai. Open a gene in
-                    a new tab with the + button above - it queries just that region through each index and shows
-                    the known transcript models alongside the actual reads, in up to 4 panels at once, each with
-                    its own BAM picker.
+                    <div className="welcome-content">
+                        <img className="welcome-logo" src={`${import.meta.env.BASE_URL}nexons_viewer_logo_path.svg`} alt="Nexons Viewer" />
+                        <p className="welcome-intro">
+                            Nexons Viewer lets you review the quantitation of nanopore sequencing data performed by the{" "}
+                            <a href="https://github.com/s-andrews/nexons/" target="_blank" rel="noreferrer">Nexons analysis program</a>.
+                            Nexons matches your aligned nanopore reads against transcript structures and quantitates them.
+                            It also produces annotated BAM files which you can load into this viewer to see your alignments
+                            and review the calls Nexons has made.
+                        </p>
+                        <p className="welcome-privacy">
+                            Although nexons-viewer is a web application it reads your data locally. No data is sent to the server.
+                        </p>
+                        <h1>Getting Started</h1>
+                        <ol className="welcome-steps">
+                            <li>Load the same GTF file used to run Nexons.</li>
+                            <li>Load one or more Nexons-annotated BAM files together with their matching BAI indices.</li>
+                            <li>Select an initial gene to view.</li>
+                        </ol>
+                    </div>
                 </div>
             )}
+            <footer className="app-footer">
+                Nexons viewer © Oliver Slay and Simon Andrews. {" "}
+                <a href="https://github.com/s-andrews/nexons-viewer/issues/" target="_blank" rel="noreferrer">
+                    Report a problem
+                </a>
+            </footer>
         </>
     );
 }

@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Oliver Slay and Simon Andrews
+// SPDX-License-Identifier: GPL-3.0-only
+
 import type { ChangeEvent } from "react";
 
 export type LayoutMode = 1 | 2 | 4;
@@ -6,6 +9,7 @@ interface HeaderProps {
     exonFileName: string;
     gtfProgress: number | null;
     bamFileLabel: string;
+    onboardingStep: "gtf" | "bam" | null;
     status: string;
     tslLevel: string;
     onTslLevelChange: (level: string) => void;
@@ -25,6 +29,7 @@ export default function Header({
     exonFileName,
     gtfProgress,
     bamFileLabel,
+    onboardingStep,
     status,
     tslLevel,
     onTslLevelChange,
@@ -59,7 +64,7 @@ export default function Header({
 
     return (
         <header>
-            <h1>Nexons&nbsp;read&nbsp;viewer</h1>
+            <img className="app-logo" src={`${import.meta.env.BASE_URL}nexons_viewer_logo_path.svg`} alt="Nexons read viewer" />
 
             <label className="tsl-label" htmlFor="tslSelect">
                 Max TSL:
@@ -78,7 +83,11 @@ export default function Header({
                 </select>
             </label>
 
-            <label className={`file-label${gtfProgress !== null ? " file-label-progress" : ""}`} htmlFor="exonInput">
+            <label
+                className={`file-label${gtfProgress !== null ? " file-label-progress" : ""}${onboardingStep === "gtf" ? " onboarding-highlight" : ""}`}
+                data-onboarding-hint={onboardingStep === "gtf" ? "Start here: load a GTF file." : undefined}
+                htmlFor="exonInput"
+            >
                 {gtfProgress !== null && (
                     <span className="progress-fill" style={{ width: `${Math.min(100, Math.round(gtfProgress * 100))}%` }} />
                 )}
@@ -89,10 +98,14 @@ export default function Header({
                             ? `GTF: ${exonFileName}`
                             : "Select GTF File"}
                 </span>
-                <input type="file" id="exonInput" accept=".json,.gtf,.gtf.txt" disabled={gtfProgress !== null} onChange={handleExonInput} />
+                <input type="file" id="exonInput" accept=".json,.gtf,.gtf.txt,.gtf.gz,.gz" disabled={gtfProgress !== null} onChange={handleExonInput} />
             </label>
 
-            <label className="file-label" htmlFor="bamBaiInput">
+            <label
+                className={`file-label${onboardingStep === "bam" ? " onboarding-highlight" : ""}`}
+                data-onboarding-hint={onboardingStep === "bam" ? "Next: select each BAM together with its matching BAI file." : undefined}
+                htmlFor="bamBaiInput"
+            >
                 BAM + BAI: <span className="fname">{bamFileLabel}</span>
                 <input type="file" id="bamBaiInput" accept=".bam,.bai" multiple onChange={handleBamBaiInput} />
             </label>

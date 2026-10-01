@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Oliver Slay and Simon Andrews
+// SPDX-License-Identifier: GPL-3.0-only
+
 // Runs the GTF parse in a worker so a multi-GB file doesn't freeze the UI thread.
 import type { ExonGene } from "./types";
 import type { GtfWorkerRequest, GtfWorkerResponse } from "./gtfTypes";

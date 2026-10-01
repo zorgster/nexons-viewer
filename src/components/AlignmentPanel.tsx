@@ -1,5 +1,9 @@
+// Copyright (C) 2026 Oliver Slay and Simon Andrews
+// SPDX-License-Identifier: GPL-3.0-only
+
 import type { BamRecord, ExonGene } from "../types";
 import AlignmentCanvas from "./AlignmentCanvas";
+import type { TranscriptSortMode } from "../transcriptSort";
 
 export interface PanelSourceOption {
     id: string;
@@ -17,9 +21,13 @@ interface AlignmentPanelProps {
     exonIndexById: Map<string, ExonGene>;
     locked: boolean;
     sharedView: { start: number; end: number } | null;
+    transcriptSortMode: TranscriptSortMode;
+    onTranscriptSortModeChange: (mode: TranscriptSortMode) => void;
+    transcriptOrder: string[] | null;
+    minimumReadCount: number;
+    onMinimumReadCountChange: (value: number) => void;
+    visibleTranscriptIds: string[] | null;
     onViewChange: (view: { start: number; end: number }) => void;
-    sharedPeaks: Map<string, number> | null;
-    onPeaksChange: (peaks: Map<string, number>) => void;
     onToggleLock: () => void;
     showLock: boolean;
 }
@@ -35,9 +43,13 @@ export default function AlignmentPanel({
     exonIndexById,
     locked,
     sharedView,
+    transcriptSortMode,
+    onTranscriptSortModeChange,
+    transcriptOrder,
+    minimumReadCount,
+    onMinimumReadCountChange,
+    visibleTranscriptIds,
     onViewChange,
-    sharedPeaks,
-    onPeaksChange,
     onToggleLock,
     showLock,
 }: AlignmentPanelProps) {
@@ -81,9 +93,13 @@ export default function AlignmentPanel({
                         exonIndexById={exonIndexById}
                         locked={locked}
                         sharedView={sharedView}
+                        transcriptSortMode={transcriptSortMode}
+                        onTranscriptSortModeChange={onTranscriptSortModeChange}
+                        transcriptOrder={transcriptOrder}
+                        minimumReadCount={minimumReadCount}
+                        onMinimumReadCountChange={onMinimumReadCountChange}
+                        visibleTranscriptIds={visibleTranscriptIds}
                         onViewChange={onViewChange}
-                        sharedPeaks={sharedPeaks}
-                        onPeaksChange={onPeaksChange}
                     />
                 )}
             </div>

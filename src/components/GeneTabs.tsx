@@ -1,4 +1,7 @@
-import { useMemo, useState, type ChangeEvent, type KeyboardEvent } from "react";
+// Copyright (C) 2026 Oliver Slay and Simon Andrews
+// SPDX-License-Identifier: GPL-3.0-only
+
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
 import type { ExonGene } from "../types";
 
 export interface GeneTab {
@@ -12,6 +15,7 @@ interface GeneTabsProps {
     addressBarOpen: boolean;
     exonIndexById: Map<string, ExonGene>;
     exonIndexReady: boolean;
+    showAddGeneHint: boolean;
     onSelectTab: (id: string) => void;
     onCloseTab: (id: string) => void;
     onOpenAddressBar: () => void;
@@ -25,6 +29,7 @@ export default function GeneTabs({
     addressBarOpen,
     exonIndexById,
     exonIndexReady,
+    showAddGeneHint,
     onSelectTab,
     onCloseTab,
     onOpenAddressBar,
@@ -33,6 +38,8 @@ export default function GeneTabs({
 }: GeneTabsProps) {
     const [query, setQuery] = useState("");
     const [showSuggestions, setShowSuggestions] = useState(false);
+    const [activeIndex, setActiveIndex] = useState(-1);
+    const activeSuggestionRef = useRef<HTMLDivElement>(null);
 
     const matches = useMemo(() => {
         const q = query.trim().toLowerCase();
@@ -43,16 +50,35 @@ export default function GeneTabs({
             .slice(0, 20);
     }, [query, exonIndexById]);
 
+    const suggestionsVisible = showSuggestions && matches.length > 0;
+
+    useEffect(() => {
+        if (suggestionsVisible) activeSuggestionRef.current?.scrollIntoView({ block: "nearest" });
+    }, [activeIndex, suggestionsVisible]);
+
     function pickGene(g: ExonGene) {
         setQuery("");
         setShowSuggestions(false);
+        setActiveIndex(-1);
         onPickGene(g.id);
     }
 
     function handleKeyDown(e: KeyboardEvent<HTMLInputElement>) {
+        if (e.nativeEvent.isComposing) return;
+        if (suggestionsVisible && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+            e.preventDefault();
+            setActiveIndex((current) => {
+                if (current < 0) return e.key === "ArrowDown" ? 0 : matches.length - 1;
+                return (current + (e.key === "ArrowDown" ? 1 : -1) + matches.length) % matches.length;
+            });
+        } else if (suggestionsVisible && e.key === "Enter" && matches[activeIndex]) {
+            e.preventDefault();
+            pickGene(matches[activeIndex]);
+        }
         if (e.key === "Escape") {
             setQuery("");
             setShowSuggestions(false);
+            setActiveIndex(-1);
             onCloseAddressBar();
         }
     }
@@ -85,7 +111,8 @@ export default function GeneTabs({
                 })}
                 <button
                     type="button"
-                    className={"gene-tab-add" + (tabs.length === 0 ? " gene-tab-add-empty" : "")}
+                    className={"gene-tab-add" + (tabs.length === 0 ? " gene-tab-add-empty" : "") + (showAddGeneHint ? " onboarding-highlight onboarding-highlight-right" : "")}
+                    data-onboarding-hint={showAddGeneHint ? "Finally: click + to choose a gene to view." : undefined}
                     onClick={onOpenAddressBar}
                     title="Open a gene in a new tab"
                 >
@@ -100,16 +127,32 @@ export default function GeneTabs({
                         placeholder={exonIndexReady ? "Gene ID or name" : "Load a GTF first…"}
                         disabled={!exonIndexReady}
                         autoComplete="off"
+                        role="combobox"
+                        aria-label="Gene ID or name"
+                        aria-autocomplete="list"
+                        aria-expanded={suggestionsVisible}
+                        aria-controls={suggestionsVisible ? "suggestions" : undefined}
+                        aria-activedescendant={suggestionsVisible && matches[activeIndex] ? `gene-suggestion-${activeIndex}` : undefined}
                         autoFocus
                         value={query}
-                        onChange={(e: ChangeEvent<HTMLInputElement>) => { setQuery(e.target.value); setShowSuggestions(true); }}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) => { setQuery(e.target.value); setShowSuggestions(true); setActiveIndex(-1); }}
                         onKeyDown={handleKeyDown}
                         onBlur={() => window.setTimeout(() => setShowSuggestions(false), 150)}
                     />
-                    {showSuggestions && matches.length > 0 && (
-                        <div id="suggestions">
-                            {matches.map((g) => (
-                                <div className="row" key={g.id} onMouseDown={(e) => e.preventDefault()} onClick={() => pickGene(g)}>
+                    {suggestionsVisible && (
+                        <div id="suggestions" role="listbox" aria-label="Gene suggestions">
+                            {matches.map((g, index) => (
+                                <div
+                                    id={`gene-suggestion-${index}`}
+                                    className={"row" + (index === activeIndex ? " active" : "")}
+                                    key={g.id}
+                                    ref={index === activeIndex ? activeSuggestionRef : null}
+                                    role="option"
+                                    aria-selected={index === activeIndex}
+                                    onMouseEnter={() => setActiveIndex(index)}
+                                    onMouseDown={(e) => e.preventDefault()}
+                                    onClick={() => pickGene(g)}
+                                >
                                     <span>
                                         {g.name && g.name !== g.id ? (
                                             <>{g.name} <span className="sugg-meta">{g.id}</span></>

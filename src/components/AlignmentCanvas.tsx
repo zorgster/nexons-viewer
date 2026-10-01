@@ -1,39 +1,48 @@
+// Copyright (C) 2026 Oliver Slay and Simon Andrews
+// SPDX-License-Identifier: GPL-3.0-only
+
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { BamRecord, CigarOp, ExonGene, ExonTranscript } from "../types";
+import {
+    compareTranscriptsByName,
+    sortTranscriptsByReadCount,
+    transcriptsMeetingMinimumReadCount,
+    type TranscriptSortMode,
+} from "../transcriptSort";
 
 // A stable reference (not a fresh `[]` literal per render) - ownPeaks below is memoized on
-// this array's identity, and an unstable fallback would recompute it every render, which
-// would re-fire the peaks-reporting effect every render too.
+// this array's identity, and an unstable fallback would recompute it every render.
 const EMPTY_TRANSCRIPTS: ExonTranscript[] = [];
 
-// Reads sharing a gene (nG) share a hue, so an overlapping gene's reads (parked in the
-// "no match to this gene" lane) can be visually traced back to which nearby gene they actually
-// belong to. Confidence (nR: unique/partial/gene/multi) is shown as fill *style* instead of hue -
-// see drawConfidenceBlock. "multi" reads may be compatible with more than one gene (per
-// nexons.py, not just one transcript), so they don't get a gene hue at all.
-const GENE_HUE_PALETTE = [
-    "31,119,180", "255,127,14", "44,160,44", "214,39,40", "148,103,189",
-    "140,86,75", "227,119,194", "188,189,34", "23,190,207", "241,143,1",
-];
+// Read hue is semantic: green means the read is assigned to the currently displayed gene,
+// purple means it is assigned to another single gene, and gray means multi-gene or no hit.
+// Confidence (nR: unique/partial/gene/multi) is shown as fill *style* instead of hue - see
+// drawConfidenceBlock.
+const CURRENT_GENE_GREEN = "34,197,94";
+const OTHER_GENE_PURPLE = "147,51,234";
 const NEUTRAL_GRAY = "140,140,140";
 
-function hashStringToIndex(s: string, mod: number): number {
-    let h = 0;
-    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
-    return Math.abs(h) % mod;
-}
-
-function colorForGene(geneId: string | undefined): string {
-    if (!geneId) return NEUTRAL_GRAY;
-    return GENE_HUE_PALETTE[hashStringToIndex(geneId, GENE_HUE_PALETTE.length)];
-}
-
-function colorForRead(r: BamRecord): string {
+function colorForRead(r: BamRecord, currentGene: ExonGene): string {
     const nR = typeof r.tags.nR === "string" ? r.tags.nR : undefined;
-    if (nR === "unique" || nR === "partial" || nR === "gene") {
-        return colorForGene(typeof r.tags.nG === "string" ? r.tags.nG : undefined);
-    }
-    return NEUTRAL_GRAY; // "multi" (ambiguous across genes) or no hit at all
+    if (nR !== "unique" && nR !== "partial" && nR !== "gene") return NEUTRAL_GRAY;
+
+    const nG = typeof r.tags.nG === "string" ? r.tags.nG : undefined;
+    if (!nG) return NEUTRAL_GRAY;
+    return nG === currentGene.id || nG === currentGene.name ? CURRENT_GENE_GREEN : OTHER_GENE_PURPLE;
+}
+
+function isAnnotatedToGene(r: BamRecord, gene: ExonGene): boolean {
+    const nG = typeof r.tags.nG === "string" ? r.tags.nG : undefined;
+    return nG === gene.id || nG === gene.name;
+}
+
+function formatReadSuffix(readCount: number, totalReadCount: number): string {
+    if (readCount === 0) return "";
+    const percentage = totalReadCount > 0 ? (readCount / totalReadCount) * 100 : 0;
+    const formattedPercentage = percentage >= 10
+        ? Math.round(percentage).toString()
+        : percentage.toFixed(1);
+    return ` [${readCount.toLocaleString()} ${formattedPercentage}%]`;
 }
 
 // There's no genomics-standard color scheme for CIGAR text (the SAM spec defines the ops,
@@ -50,7 +59,7 @@ function renderCigarSpans(cigar: CigarOp[]) {
     ));
 }
 
-const ROW_H = 12;
+const ROW_H = 6;
 const ROW_GAP = 3;
 const PX_GAP_MIN = 2;
 const EXON_ROW_H = 10;
@@ -63,10 +72,16 @@ const SEP_GAP = 6;
 const LANE_INNER_GAP = 4;
 const LANE_BOTTOM_GAP = 10;
 const MIN_VIEW_BP = 30;
+const KEYBOARD_PAN_FRACTION = 0.05;
+const ZOOM_IN_FACTOR = 0.8;
+const ZOOM_OUT_FACTOR = 1.25;
 const CIGAR_DETAIL_MIN_PX_PER_BASE = 0.6;
-const DENSITY_TRACK_H = 36;
-const DENSITY_GAP = 2; // tight gap between a collapsed lane's density track and its exon-model row
+const DENSITY_TRACK_H = 18;
+const DENSITY_GAP = 2; // tight gap between a lane's density track and its exon-model row
 const UNASSIGNED_ID = "__unassigned__";
+const TOGGLE_GLYPH_W = 14;
+
+type LaneViewMode = "transcript" | "reads" | "density";
 
 type ScaleX = (g: number) => number;
 
@@ -107,29 +122,20 @@ function compareByExonStructure(a: BamRecord, b: BamRecord): number {
     return a.start - b.start;
 }
 
-function packReads(reads: BamRecord[], scaleX: ScaleX): { reads: PackedRead[]; rowCount: number } {
+function packReads(reads: BamRecord[]): { reads: PackedRead[]; rowCount: number } {
     const sorted = [...reads].sort(compareByExonStructure) as PackedRead[];
-    const rowEndPx: number[] = [];
-    for (const r of sorted) {
-        const xStart = scaleX(r.start);
-        const xEnd = scaleX(r.end);
-        let placedRow = -1;
-        for (let i = 0; i < rowEndPx.length; i++) {
-            if (rowEndPx[i] <= xStart) { placedRow = i; break; }
-        }
-        if (placedRow === -1) { placedRow = rowEndPx.length; rowEndPx.push(0); }
-        rowEndPx[placedRow] = xEnd + PX_GAP_MIN;
-        r.row = placedRow;
-    }
-    return { reads: sorted, rowCount: rowEndPx.length };
+    sorted.forEach((r, i) => {
+        r.row = i;
+    });
+    return { reads: sorted, rowCount: sorted.length };
 }
 
 // Packs primary reads first (rows 0..N), then secondary reads below them (rows N..)
-function layoutLane(reads: BamRecord[], scaleX: ScaleX) {
+function layoutLane(reads: BamRecord[]) {
     const primary = reads.filter((r) => !r.isSecondary);
     const secondary = reads.filter((r) => r.isSecondary);
-    const packedPrimary = packReads(primary, scaleX);
-    const packedSecondary = packReads(secondary, scaleX);
+    const packedPrimary = packReads(primary);
+    const packedSecondary = packReads(secondary);
     for (const r of packedSecondary.reads) r.row += packedPrimary.rowCount;
     return {
         reads: [...packedPrimary.reads, ...packedSecondary.reads],
@@ -157,8 +163,8 @@ function packGeneItems(items: { start: number; end: number; gene: ExonGene }[], 
 // Per-pixel-column read depth from each read's reference-consuming blocks (already split at
 // N, so splice gaps don't count as covered). Secondary alignments are excluded so depth
 // reflects actual coverage rather than being inflated by multi-mapping placements. This is
-// only the shape drawn in the current viewport - the peak used to scale/label it is computed
-// separately (see computeMaxDepth) so it stays stable across pan/zoom and across panels.
+// only the shape drawn in the current viewport - the peak used to scale it is computed
+// separately (see computeMaxDepth) so it stays stable across pan/zoom.
 function computeCoverage(reads: BamRecord[], scaleX: ScaleX, pxFrom: number, pxTo: number): Float64Array {
     const n = Math.max(1, Math.ceil(pxTo - pxFrom));
     const delta = new Float64Array(n + 1);
@@ -169,7 +175,9 @@ function computeCoverage(reads: BamRecord[], scaleX: ScaleX, pxFrom: number, pxT
             const x2 = Math.min(pxTo, scaleX(bEnd));
             if (x2 <= x1) continue;
             const i1 = Math.floor(x1 - pxFrom);
-            const i2 = Math.floor(x2 - pxFrom);
+            // Preserve subpixel-wide covered regions by assigning them at least one full
+            // density column. Adjacent regions may intentionally share that column.
+            const i2 = Math.min(n, Math.max(i1 + 1, Math.ceil(x2 - pxFrom)));
             delta[i1] += 1;
             if (i2 < n) delta[i2] -= 1;
         }
@@ -205,26 +213,17 @@ function computeMaxDepth(reads: BamRecord[]): number {
 }
 
 // Fixed track height regardless of the lane's absolute depth (a peak of 3 and a peak of 3000
-// both fill the band) - the peak value is printed at the left edge of the band, right where the
-// bars themselves start, so the scale is legible.
+// both fill the band).
 function drawDensityTrack(ctx: CanvasRenderingContext2D, pxFrom: number, depth: Float64Array, peak: number, trackY: number, trackH: number) {
     ctx.fillStyle = "rgba(37,99,235,0.55)";
     for (let i = 0; i < depth.length; i++) {
         if (depth[i] <= 0) continue;
-        const h = peak > 0 ? (depth[i] / peak) * trackH : 0;
+        const h = peak > 0 ? Math.min(trackH, (depth[i] / peak) * trackH) : 0;
         ctx.fillRect(pxFrom + i, trackY + (trackH - h), 1, Math.max(1, h));
     }
     ctx.strokeStyle = "#d7dbe0";
     ctx.lineWidth = 1;
     ctx.strokeRect(pxFrom + 0.5, trackY + 0.5, Math.max(1, depth.length - 1), trackH - 1);
-
-    const label = Math.round(peak).toLocaleString();
-    ctx.font = "600 10px -apple-system, sans-serif";
-    const labelWidth = ctx.measureText(label).width;
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(pxFrom + 2, trackY - 1, labelWidth + 4, 12);
-    ctx.fillStyle = "#374151";
-    ctx.fillText(label, pxFrom + 4, trackY + 9);
 }
 
 // Confidence (nR) is shown as fill style rather than hue, since hue is reserved for gene
@@ -282,9 +281,9 @@ function drawConfidenceBlock(ctx: CanvasRenderingContext2D, x: number, y: number
     }
 }
 
-function drawReadRow(ctx: CanvasRenderingContext2D, r: PackedRead, rowY: number, scaleX: ScaleX, showCigarDetail: boolean, hitRects: HitRect[]) {
+function drawReadRow(ctx: CanvasRenderingContext2D, r: PackedRead, rowY: number, scaleX: ScaleX, showCigarDetail: boolean, selected: boolean, currentGene: ExonGene, hitRects: HitRect[]) {
     const midY = rowY + ROW_H / 2;
-    const rgb = colorForRead(r);
+    const rgb = colorForRead(r, currentGene);
     const nR = typeof r.tags.nR === "string" ? r.tags.nR : undefined;
 
     ctx.strokeStyle = `rgba(${rgb},${r.isSecondary ? 0.4 : 0.7})`;
@@ -299,6 +298,17 @@ function drawReadRow(ctx: CanvasRenderingContext2D, r: PackedRead, rowY: number,
         const x2 = scaleX(bEnd);
         const w = Math.max(1, x2 - x1);
         drawConfidenceBlock(ctx, x1, rowY, w, ROW_H, rgb, nR, r.isSecondary);
+    }
+
+    if (selected) {
+        ctx.strokeStyle = "#000000";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([]);
+        for (const [bStart, bEnd] of r.blocks) {
+            const x1 = scaleX(bStart);
+            const x2 = scaleX(bEnd);
+            ctx.strokeRect(x1 + 0.5, rowY + 0.5, Math.max(1, x2 - x1) - 1, ROW_H - 1);
+        }
     }
 
     if (showCigarDetail) drawCigarDetail(ctx, r, scaleX, rowY);
@@ -358,14 +368,15 @@ function drawToggleLabel(
     id: string,
     hitRects: HitRect[],
     bold = false,
+    canToggle = true,
 ) {
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, y - 1, marginL - 2, rowH + 2);
     ctx.fillStyle = bold ? "#1f2933" : "#6b7280";
     ctx.font = `${bold ? "700" : "400"} 11px -apple-system, sans-serif`;
-    const triangle = collapsed ? "▸" : "▾";
-    ctx.fillText(`${triangle} ${label}`, 4, y + rowH - 1);
-    hitRects.push({ x1: 0, x2: width - MARGIN_R, y1: y - 1, y2: y + rowH + 1, kind: "toggle", id });
+    if (canToggle) ctx.fillText(collapsed ? "▸" : "▾", 4, y + rowH - 1);
+    ctx.fillText(label, 4 + TOGGLE_GLYPH_W, y + rowH - 1);
+    if (canToggle) hitRects.push({ x1: 0, x2: width - MARGIN_R, y1: y - 1, y2: y + rowH + 1, kind: "toggle", id });
 }
 
 function drawCigarDetail(ctx: CanvasRenderingContext2D, r: BamRecord, scaleX: ScaleX, rowY: number) {
@@ -405,25 +416,29 @@ interface AlignmentCanvasProps {
     exonIndexById: Map<string, ExonGene>;
     locked: boolean;
     sharedView: { start: number; end: number } | null;
+    transcriptSortMode: TranscriptSortMode;
+    onTranscriptSortModeChange: (mode: TranscriptSortMode) => void;
+    transcriptOrder: string[] | null;
+    minimumReadCount: number;
+    onMinimumReadCountChange: (value: number) => void;
+    visibleTranscriptIds: string[] | null;
     onViewChange: (view: { start: number; end: number }) => void;
-    // Density-track peak per lane id (transcript id, or UNASSIGNED_ID), merged across every
-    // open panel - lets two BAM files be compared on the same vertical scale per transcript.
-    sharedPeaks: Map<string, number> | null;
-    onPeaksChange: (peaks: Map<string, number>) => void;
 }
 
-const ZOOM_LEVELS: { label: string; bp: number | null }[] = [
-    { label: "Whole region", bp: null },
-    { label: "50 kb", bp: 50000 },
-    { label: "10 kb", bp: 10000 },
-    { label: "5 kb", bp: 5000 },
-    { label: "1 kb", bp: 1000 },
-    { label: "500 bp", bp: 500 },
-    { label: "200 bp", bp: 200 },
-    { label: "100 bp", bp: 100 },
-];
-
-export default function AlignmentCanvas({ gene, records, exonIndexById, locked, sharedView, onViewChange, sharedPeaks, onPeaksChange }: AlignmentCanvasProps) {
+export default function AlignmentCanvas({
+    gene,
+    records,
+    exonIndexById,
+    locked,
+    sharedView,
+    transcriptSortMode,
+    onTranscriptSortModeChange,
+    transcriptOrder,
+    minimumReadCount,
+    onMinimumReadCountChange,
+    visibleTranscriptIds,
+    onViewChange,
+}: AlignmentCanvasProps) {
     const containerRef = useRef<HTMLDivElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const tooltipRef = useRef<HTMLDivElement>(null);
@@ -432,29 +447,52 @@ export default function AlignmentCanvas({ gene, records, exonIndexById, locked, 
 
     const [width, setWidth] = useState(600);
     const [tooltip, setTooltip] = useState<{ hit: HitRect; x: number; y: number } | null>(null);
+    const [selectedRead, setSelectedRead] = useState<BamRecord | null>(null);
     const [hoverToggle, setHoverToggle] = useState(false);
+    const [mouseX, setMouseX] = useState<number | null>(null);
 
     const geneStart0 = gene.start - 1;
-    const transcripts = useMemo(() => {
+    const orderedTranscripts = useMemo(() => {
         const list = gene.transcripts || EMPTY_TRANSCRIPTS;
-        return [...list].sort((a, b) => (!!b.isMane === !!a.isMane ? a.id.localeCompare(b.id) : b.isMane ? 1 : -1));
-    }, [gene]);
+        if (transcriptSortMode === "name") return [...list].sort(compareTranscriptsByName);
+        if (!transcriptOrder) return sortTranscriptsByReadCount(list, records);
 
-    // Every transcript (plus the unassigned-reads lane) starts collapsed to a coverage density
-    // track; expanding one reveals its individual reads. Reset when a different gene is opened.
-    const [collapsedIds, setCollapsedIds] = useState<Set<string>>(
-        () => new Set([...transcripts.map((t) => t.id), UNASSIGNED_ID]),
+        const orderById = new Map(transcriptOrder.map((id, index) => [id, index]));
+        return [...list].sort((a, b) =>
+            (orderById.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (orderById.get(b.id) ?? Number.MAX_SAFE_INTEGER)
+            || compareTranscriptsByName(a, b),
+        );
+    }, [gene, records, transcriptSortMode, transcriptOrder]);
+
+    const transcripts = useMemo(() => {
+        const ids = visibleTranscriptIds
+            ?? transcriptsMeetingMinimumReadCount(gene.transcripts || EMPTY_TRANSCRIPTS, [records], minimumReadCount);
+        const visibleIds = new Set(ids);
+        return orderedTranscripts.filter((transcript) => visibleIds.has(transcript.id));
+    }, [gene, records, orderedTranscripts, minimumReadCount, visibleTranscriptIds]);
+
+    const selectedGeneRecords = useMemo(
+        () => records.filter((record) => isAnnotatedToGene(record, gene)),
+        [gene, records],
     );
 
+    // Every transcript (plus the unassigned-reads lane) starts with just its exon structure.
+    // Repeated clicks cycle through reads+density, density only, and back to transcript only.
+    // Reset when a different gene is opened.
+    const [laneViewModes, setLaneViewModes] = useState<Map<string, LaneViewMode>>(() => new Map());
+
     useEffect(() => {
-        setCollapsedIds(new Set([...transcripts.map((t) => t.id), UNASSIGNED_ID]));
+        setLaneViewModes(new Map());
+        setSelectedRead(null);
+        setTooltip(null);
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [gene.id]);
 
-    function toggleCollapsed(id: string) {
-        setCollapsedIds((prev) => {
-            const next = new Set(prev);
-            if (next.has(id)) next.delete(id); else next.add(id);
+    function cycleLaneView(id: string) {
+        setLaneViewModes((prev) => {
+            const next = new Map(prev);
+            const current = next.get(id) ?? "transcript";
+            next.set(id, current === "transcript" ? "reads" : current === "reads" ? "density" : "transcript");
             return next;
         });
     }
@@ -462,29 +500,14 @@ export default function AlignmentCanvas({ gene, records, exonIndexById, locked, 
     // Whole-region peak depth per lane (not view-filtered), so it stays stable across pan/zoom.
     const ownPeaks = useMemo(() => {
         const map = new Map<string, number>();
-        const assignedTranscriptIds = new Set(transcripts.map((t) => t.id));
+        const assignedTranscriptIds = new Set((gene.transcripts || EMPTY_TRANSCRIPTS).map((t) => t.id));
         for (const t of transcripts) {
             map.set(t.id, computeMaxDepth(records.filter((r) => r.tags.nT === t.id)));
         }
-        const unassigned = records.filter((r) => !r.tags.nT || !assignedTranscriptIds.has(r.tags.nT as string));
+        const unassigned = selectedGeneRecords.filter((r) => !r.tags.nT || !assignedTranscriptIds.has(r.tags.nT as string));
         map.set(UNASSIGNED_ID, computeMaxDepth(unassigned));
         return map;
-    }, [records, transcripts]);
-
-    const onPeaksChangeRef = useRef(onPeaksChange);
-    onPeaksChangeRef.current = onPeaksChange;
-
-    useEffect(() => {
-        onPeaksChangeRef.current(ownPeaks);
-    }, [ownPeaks]);
-
-    // Scale every panel's density track against the larger of its own peak and whatever's been
-    // reported by other open panels for the same transcript, so coverage is comparable across BAMs.
-    const displayPeaks = useMemo(() => {
-        const map = new Map(ownPeaks);
-        if (sharedPeaks) for (const [id, v] of sharedPeaks) map.set(id, Math.max(map.get(id) ?? 0, v));
-        return map;
-    }, [ownPeaks, sharedPeaks]);
+    }, [gene, records, selectedGeneRecords, transcripts]);
 
     const mergedExons = useMemo(() => {
         const all = transcripts.flatMap((t) => t.exons).sort((a, b) => a[0] - b[0]);
@@ -509,15 +532,41 @@ export default function AlignmentCanvas({ gene, records, exonIndexById, locked, 
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [gene.id, records]);
 
+    const rightLabelWidth = useMemo(() => {
+        const measureCanvas = document.createElement("canvas");
+        const measureCtx = measureCanvas.getContext("2d")!;
+        const assignedReadCounts = new Map<string, number>();
+        for (const record of selectedGeneRecords) {
+            if (typeof record.tags.nT !== "string") continue;
+            assignedReadCounts.set(record.tags.nT, (assignedReadCounts.get(record.tags.nT) ?? 0) + 1);
+        }
+
+        let maxWidth = 0;
+        for (const transcript of transcripts) {
+            if (!transcript.name || transcript.name === transcript.id) continue;
+            measureCtx.font = `${transcript.isMane ? "700" : "400"} 11px -apple-system, sans-serif`;
+            const suffix = formatReadSuffix(assignedReadCounts.get(transcript.id) ?? 0, selectedGeneRecords.length);
+            maxWidth = Math.max(maxWidth, measureCtx.measureText(`${transcript.name}${suffix}`).width);
+        }
+        return maxWidth;
+    }, [selectedGeneRecords, transcripts]);
+
     const hardEnd0 = useMemo(() => {
         let e = gene.end;
         for (const r of records) if (r.end > e) e = r.end;
         let s = geneStart0;
         for (const r of records) if (r.start < s) s = r.start;
-        const pad = Math.max(200, Math.round((e - s) * 0.05));
-        return e + pad;
+        const span = e - s;
+        const leftPad = Math.max(200, Math.round(span * 0.05));
+        const baselineRightPad = Math.max(200, Math.round(span * 0.05));
+        const plotWidth = Math.max(1, width - MARGIN_L_MAX - MARGIN_R);
+        const requiredLabelSpace = Math.min(plotWidth - 1, rightLabelWidth + 10);
+        const labelRightPad = requiredLabelSpace > 0
+            ? Math.ceil((requiredLabelSpace * (span + leftPad)) / (plotWidth - requiredLabelSpace))
+            : 0;
+        return e + Math.max(baselineRightPad, labelRightPad);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [gene.id, records]);
+    }, [gene.id, records, width, rightLabelWidth]);
 
     const [view, setView] = useState({ start: hardStart0, end: hardEnd0 });
 
@@ -537,9 +586,11 @@ export default function AlignmentCanvas({ gene, records, exonIndexById, locked, 
 
     // Reset pan/zoom whenever a different gene's alignments are opened
     useEffect(() => {
-        updateView({ start: hardStart0, end: hardEnd0 });
+        const nextView = { start: hardStart0, end: hardEnd0 };
+        setView(nextView);
+        if (!locked) onViewChange(nextView);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [hardStart0, hardEnd0]);
+    }, [hardStart0, hardEnd0, locked]);
 
     const overlappingGenes = useMemo(
         () =>
@@ -556,7 +607,7 @@ export default function AlignmentCanvas({ gene, records, exonIndexById, locked, 
         const TRIANGLE_W = 14; // "▸ " / "▾ " prefix on collapsible lane labels
         let labelWidth = 0;
         for (const t of transcripts) labelWidth = Math.max(labelWidth, measureCtx.measureText(t.id).width + TRIANGLE_W);
-        labelWidth = Math.max(labelWidth, measureCtx.measureText("Unassigned reads").width + TRIANGLE_W);
+        labelWidth = Math.max(labelWidth, measureCtx.measureText("Unassigned").width + TRIANGLE_W);
         for (const g of overlappingGenes) {
             labelWidth = Math.max(labelWidth, measureCtx.measureText(g.name && g.name !== g.id ? g.name : g.id).width);
         }
@@ -565,10 +616,18 @@ export default function AlignmentCanvas({ gene, records, exonIndexById, locked, 
     }, [transcripts, overlappingGenes]);
 
     useLayoutEffect(() => {
-        if (containerRef.current) {
-            setWidth(Math.max(600, containerRef.current.clientWidth - 20 || document.body.clientWidth - 60));
-        }
-    }, [gene.id]);
+        const container = containerRef.current;
+        if (!container) return;
+
+        const updateWidth = () => {
+            setWidth(Math.max(600, container.clientWidth - 20 || document.body.clientWidth - 60));
+        };
+        updateWidth();
+
+        const observer = new ResizeObserver(updateWidth);
+        observer.observe(container);
+        return () => observer.disconnect();
+    }, []);
 
     function clampView(newStart: number, newEnd: number): [number, number] {
         const w = newEnd - newStart;
@@ -602,15 +661,30 @@ export default function AlignmentCanvas({ gene, records, exonIndexById, locked, 
         const showCigarDetail = pxPerBase >= CIGAR_DETAIL_MIN_PX_PER_BASE;
 
         const visible = records.filter((r) => r.start < effectiveView.end && r.end > effectiveView.start);
-        const assignedTranscriptIds = new Set(transcripts.map((t) => t.id));
+        const assignedTranscriptIds = new Set((gene.transcripts || EMPTY_TRANSCRIPTS).map((t) => t.id));
+        const totalReadCount = selectedGeneRecords.length;
 
-        type TranscriptLane = { kind: "transcript"; t: ExonTranscript; collapsed: boolean; layout: ReturnType<typeof layoutLane> | null; density: Float64Array | null };
+        type TranscriptLane = {
+            kind: "transcript";
+            t: ExonTranscript;
+            collapsed: boolean;
+            showDensity: boolean;
+            showReads: boolean;
+            hasAssignedReads: boolean;
+            readCount: number;
+            layout: ReturnType<typeof layoutLane> | null;
+            density: Float64Array | null;
+        };
         type UnassignedLane = {
             kind: "unassigned";
+            hasReads: boolean;
             collapsed: boolean;
+            showDensity: boolean;
+            showReads: boolean;
             geneLevelLayout: ReturnType<typeof layoutLane> | null;
             noMatchLayout: ReturnType<typeof layoutLane> | null;
             density: Float64Array | null;
+            readCount: number;
         };
         type Lane = TranscriptLane | UnassignedLane;
 
@@ -619,32 +693,46 @@ export default function AlignmentCanvas({ gene, records, exonIndexById, locked, 
 
         // No point drawing an empty bordered box when not one of the open BAM panels has any
         // reads for this transcript - just show the exon model on its own.
-        const hasDensity = (id: string) => (displayPeaks.get(id) ?? 0) > 0;
+        const hasDensity = (id: string) => (ownPeaks.get(id) ?? 0) > 0;
 
-        // The density track (when there's anything to show) stays visible whether a lane is
-        // collapsed or expanded - only the individual reads below it toggle. Otherwise expanding
-        // a lane removes the track and everything shifts up, so the row you just clicked jumps
-        // out from under the mouse.
+        // Collapsed lanes show only the transcript/merged exon structure. Expanded lanes add the
+        // quantitative density track (when there's anything to show) and the individual reads.
         const lanes: Lane[] = transcripts.map((t) => {
-            const collapsed = collapsedIds.has(t.id);
             const reads = visible.filter((r) => r.tags.nT === t.id);
+            const readCount = selectedGeneRecords.filter((r) => r.tags.nT === t.id).length;
+            const mode = readCount > 0 ? laneViewModes.get(t.id) ?? "transcript" : "transcript";
+            const showReads = mode === "reads";
             return {
-                kind: "transcript", t, collapsed,
-                layout: collapsed ? null : layoutLane(reads, scaleX),
+                kind: "transcript", t, collapsed: mode === "transcript",
+                showDensity: mode !== "transcript",
+                showReads,
+                hasAssignedReads: readCount > 0,
+                readCount,
+                layout: showReads ? layoutLane(reads) : null,
                 density: computeCoverage(reads, scaleX, pxFrom, pxTo),
             };
         });
 
         const unassigned = visible.filter((r) => !r.tags.nT || !assignedTranscriptIds.has(r.tags.nT as string));
-        const geneLevelReads = unassigned.filter((r) => r.tags.nR === "gene");
-        const noMatchReads = unassigned.filter((r) => r.tags.nR !== "gene");
-        const unassignedCollapsed = collapsedIds.has(UNASSIGNED_ID);
-        const unassignedDensity = computeCoverage([...geneLevelReads, ...noMatchReads], scaleX, pxFrom, pxTo);
-        lanes.push(
-            unassignedCollapsed
-                ? { kind: "unassigned", collapsed: true, geneLevelLayout: null, noMatchLayout: null, density: unassignedDensity }
-                : { kind: "unassigned", collapsed: false, geneLevelLayout: layoutLane(geneLevelReads, scaleX), noMatchLayout: layoutLane(noMatchReads, scaleX), density: unassignedDensity },
-        );
+        const selectedGeneUnassigned = unassigned.filter((r) => isAnnotatedToGene(r, gene));
+        const unassignedReadCount = selectedGeneRecords.filter((r) => !r.tags.nT || !assignedTranscriptIds.has(r.tags.nT as string)).length;
+        const geneLevelReads = unassigned.filter((r) => r.tags.nR === "gene" && isAnnotatedToGene(r, gene));
+        const noMatchReads = unassigned.filter((r) => r.tags.nR !== "gene" || !isAnnotatedToGene(r, gene));
+        const hasVisibleUnassignedReads = records.some((r) => !r.tags.nT || !assignedTranscriptIds.has(r.tags.nT as string));
+        const unassignedMode = hasVisibleUnassignedReads ? laneViewModes.get(UNASSIGNED_ID) ?? "transcript" : "transcript";
+        const showUnassignedReads = unassignedMode === "reads";
+        const unassignedDensity = computeCoverage(selectedGeneUnassigned, scaleX, pxFrom, pxTo);
+        lanes.push({
+            kind: "unassigned",
+            hasReads: hasVisibleUnassignedReads,
+            collapsed: unassignedMode === "transcript",
+            showDensity: unassignedMode !== "transcript",
+            showReads: showUnassignedReads,
+            geneLevelLayout: showUnassignedReads ? layoutLane(geneLevelReads) : null,
+            noMatchLayout: showUnassignedReads ? layoutLane(noMatchReads) : null,
+            density: unassignedDensity,
+            readCount: unassignedReadCount,
+        });
 
         const geneItems = overlappingGenes
             .filter((g) => g.start - 1 < effectiveView.end && g.end > effectiveView.start)
@@ -654,18 +742,14 @@ export default function AlignmentCanvas({ gene, records, exonIndexById, locked, 
             ? SEP_GAP + 1 + SEP_GAP + 14 + LANE_INNER_GAP + geneLayout.rowCount * (GENE_ROW_H + ROW_GAP) + LANE_BOTTOM_GAP
             : 0;
 
-        let height = 30 + GENE_REGION_ROW_H + SEP_GAP + 1 + SEP_GAP + contextHeight;
+        let height = 30 + GENE_REGION_ROW_H + SEP_GAP + contextHeight;
         for (const lane of lanes) {
-            height += SEP_GAP + 1 + SEP_GAP;
-            // density track (when there's anything to show) sits above the exon-model row and
-            // stays put whether the lane is collapsed or expanded - only what's below it toggles
+            height += SEP_GAP;
             const id = lane.kind === "transcript" ? lane.t.id : UNASSIGNED_ID;
-            height += hasDensity(id) ? DENSITY_TRACK_H + DENSITY_GAP + EXON_ROW_H : EXON_ROW_H;
-            if (lane.collapsed) {
-                height += LANE_BOTTOM_GAP;
-            } else if (lane.kind === "transcript") {
+            height += lane.showDensity && hasDensity(id) ? DENSITY_TRACK_H + DENSITY_GAP + EXON_ROW_H : EXON_ROW_H;
+            if (lane.showReads && lane.kind === "transcript") {
                 height += LANE_INNER_GAP + lane.layout!.rowCount * (ROW_H + ROW_GAP) + LANE_BOTTOM_GAP;
-            } else {
+            } else if (lane.showReads && lane.kind === "unassigned") {
                 height += LANE_INNER_GAP;
                 height += 14 + LANE_INNER_GAP + lane.geneLevelLayout!.rowCount * (ROW_H + ROW_GAP) + LANE_BOTTOM_GAP;
                 height += 14 + LANE_INNER_GAP + lane.noMatchLayout!.rowCount * (ROW_H + ROW_GAP) + LANE_BOTTOM_GAP;
@@ -680,17 +764,15 @@ export default function AlignmentCanvas({ gene, records, exonIndexById, locked, 
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.clearRect(0, 0, width, height);
 
-        // Ruler
-        ctx.strokeStyle = "#d7dbe0";
-        ctx.fillStyle = "#6b7280";
-        ctx.font = "11px -apple-system, sans-serif";
-        ctx.beginPath();
-        ctx.moveTo(marginL, 20.5);
-        ctx.lineTo(width - MARGIN_R, 20.5);
-        ctx.stroke();
-        ctx.fillText(`${Math.round(effectiveView.start + 1).toLocaleString()}`, marginL, 14);
-        const endLabel = `${Math.round(effectiveView.end).toLocaleString()}`;
-        ctx.fillText(endLabel, width - MARGIN_R - ctx.measureText(endLabel).width, 14);
+        if (selectedRead) {
+            ctx.fillStyle = "rgba(239,68,68,0.12)";
+            for (const [bStart, bEnd] of selectedRead.blocks) {
+                const x1 = Math.max(pxFrom, scaleX(bStart));
+                const x2 = Math.min(pxTo, scaleX(bEnd));
+                if (x2 <= x1) continue;
+                ctx.fillRect(x1, 30, Math.max(1, x2 - x1), Math.max(0, height - 30));
+            }
+        }
 
         const hitRects: HitRect[] = [];
         let y = 30;
@@ -712,23 +794,9 @@ export default function AlignmentCanvas({ gene, records, exonIndexById, locked, 
             hitRects.push({ x1: gx1, x2: gx2, y1: y, y2: y + GENE_REGION_ROW_H, kind: "generegion" });
 
             y += GENE_REGION_ROW_H + SEP_GAP;
-            ctx.strokeStyle = "#b6bcc4";
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.moveTo(marginL, Math.round(y) + 0.5);
-            ctx.lineTo(width - MARGIN_R, Math.round(y) + 0.5);
-            ctx.stroke();
-            y += SEP_GAP;
         }
 
         for (const lane of lanes) {
-            y += SEP_GAP;
-            ctx.strokeStyle = "#b6bcc4";
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.moveTo(marginL, Math.round(y) + 0.5);
-            ctx.lineTo(width - MARGIN_R, Math.round(y) + 0.5);
-            ctx.stroke();
             y += SEP_GAP;
 
             if (lane.kind === "transcript") {
@@ -742,7 +810,7 @@ export default function AlignmentCanvas({ gene, records, exonIndexById, locked, 
                     ctx.lineTo(scaleX(t.end), midY);
                     ctx.stroke();
 
-                    ctx.fillStyle = "#3b4754";
+                    ctx.fillStyle = lane.hasAssignedReads ? "#3b4754" : "#d1d5db";
                     for (const [exStart, exEnd] of t.exons) {
                         const x1 = scaleX(exStart - 1);
                         const x2 = scaleX(exEnd);
@@ -752,25 +820,25 @@ export default function AlignmentCanvas({ gene, records, exonIndexById, locked, 
                     if (t.name && t.name !== t.id) {
                         ctx.fillStyle = t.isMane ? "#1f2933" : "#6b7280";
                         ctx.font = `${t.isMane ? "700" : "400"} 11px -apple-system, sans-serif`;
-                        ctx.fillText(t.name, scaleX(t.end) + 6, rowY + EXON_ROW_H - 1);
+                        const readCountSuffix = formatReadSuffix(lane.readCount, totalReadCount);
+                        ctx.fillText(`${t.name}${readCountSuffix}`, scaleX(t.end) + 6, rowY + EXON_ROW_H - 1);
                     }
 
-                    drawToggleLabel(ctx, marginL, width, t.id, lane.collapsed, rowY, EXON_ROW_H, t.id, hitRects, t.isMane);
+                    drawToggleLabel(ctx, marginL, width, t.id, lane.collapsed, rowY, EXON_ROW_H, t.id, hitRects, t.isMane, lane.readCount > 0);
                 };
 
-                // density track sits above its transcript's exon row and stays put whether
-                // collapsed or expanded, so the row doesn't jump out from under the mouse on toggle
-                if (hasDensity(t.id)) {
-                    drawDensityTrack(ctx, pxFrom, lane.density!, displayPeaks.get(t.id) ?? 0, y, DENSITY_TRACK_H);
+                if (lane.showDensity && hasDensity(t.id)) {
+                    drawDensityTrack(ctx, pxFrom, lane.density!, ownPeaks.get(t.id) ?? 0, y, DENSITY_TRACK_H);
+                    hitRects.push({ x1: 0, x2: width - MARGIN_R, y1: y, y2: y + DENSITY_TRACK_H, kind: "toggle", id: t.id });
                     y += DENSITY_TRACK_H + DENSITY_GAP;
                 }
                 drawExonRow(y);
                 y += EXON_ROW_H;
-                if (lane.collapsed) {
-                    y += LANE_BOTTOM_GAP;
-                } else {
+                if (lane.showReads) {
                     y += LANE_INNER_GAP;
-                    for (const r of lane.layout!.reads) drawReadRow(ctx, r, y + r.row * (ROW_H + ROW_GAP), scaleX, showCigarDetail, hitRects);
+                    for (const r of lane.layout!.reads) {
+                        drawReadRow(ctx, r, y + r.row * (ROW_H + ROW_GAP), scaleX, showCigarDetail, r === selectedRead, gene, hitRects);
+                    }
                     y += lane.layout!.rowCount * (ROW_H + ROW_GAP) + LANE_BOTTOM_GAP;
                 }
             } else {
@@ -790,32 +858,44 @@ export default function AlignmentCanvas({ gene, records, exonIndexById, locked, 
                         ctx.fillRect(x1, rowY, Math.max(1, x2 - x1), EXON_ROW_H);
                     }
 
-                    drawToggleLabel(ctx, marginL, width, "Unassigned reads", lane.collapsed, rowY, EXON_ROW_H, UNASSIGNED_ID, hitRects);
+                    ctx.fillStyle = "#6b7280";
+                    ctx.font = "400 11px -apple-system, sans-serif";
+                    ctx.fillText(
+                        `Unassigned${formatReadSuffix(lane.readCount, totalReadCount)}`,
+                        scaleX(gene.end) + 6,
+                        rowY + EXON_ROW_H - 1,
+                    );
+
+                    // Reads without a gene annotation still need an expandable lane.
+                    drawToggleLabel(ctx, marginL, width, "Unassigned", lane.collapsed, rowY, EXON_ROW_H, UNASSIGNED_ID, hitRects, false, lane.hasReads);
                 };
 
-                if (hasDensity(UNASSIGNED_ID)) {
-                    drawDensityTrack(ctx, pxFrom, lane.density!, displayPeaks.get(UNASSIGNED_ID) ?? 0, y, DENSITY_TRACK_H);
+                if (lane.showDensity && hasDensity(UNASSIGNED_ID)) {
+                    drawDensityTrack(ctx, pxFrom, lane.density!, ownPeaks.get(UNASSIGNED_ID) ?? 0, y, DENSITY_TRACK_H);
+                    hitRects.push({ x1: 0, x2: width - MARGIN_R, y1: y, y2: y + DENSITY_TRACK_H, kind: "toggle", id: UNASSIGNED_ID });
                     y += DENSITY_TRACK_H + DENSITY_GAP;
                 }
                 drawMergedExonRow(y);
                 y += EXON_ROW_H;
-                if (lane.collapsed) {
-                    y += LANE_BOTTOM_GAP;
-                } else {
+                if (lane.showReads) {
                     y += LANE_INNER_GAP;
 
                     ctx.fillStyle = "#4b5563";
                     ctx.font = "600 11px -apple-system, sans-serif";
                     ctx.fillText("Gene-level match, no specific transcript (nR: gene)", 4, y + 11);
                     y += 14 + LANE_INNER_GAP;
-                    for (const r of lane.geneLevelLayout!.reads) drawReadRow(ctx, r, y + r.row * (ROW_H + ROW_GAP), scaleX, showCigarDetail, hitRects);
+                    for (const r of lane.geneLevelLayout!.reads) {
+                        drawReadRow(ctx, r, y + r.row * (ROW_H + ROW_GAP), scaleX, showCigarDetail, r === selectedRead, gene, hitRects);
+                    }
                     y += lane.geneLevelLayout!.rowCount * (ROW_H + ROW_GAP) + LANE_BOTTOM_GAP;
 
                     ctx.fillStyle = "#4b5563";
                     ctx.font = "600 11px -apple-system, sans-serif";
-                    ctx.fillText("No match to this gene (nR: blank/multi) — may align to an overlapping gene", 4, y + 11);
+                    ctx.fillText("No match to this gene — may align to an overlapping gene", 4, y + 11);
                     y += 14 + LANE_INNER_GAP;
-                    for (const r of lane.noMatchLayout!.reads) drawReadRow(ctx, r, y + r.row * (ROW_H + ROW_GAP), scaleX, showCigarDetail, hitRects);
+                    for (const r of lane.noMatchLayout!.reads) {
+                        drawReadRow(ctx, r, y + r.row * (ROW_H + ROW_GAP), scaleX, showCigarDetail, r === selectedRead, gene, hitRects);
+                    }
                     y += lane.noMatchLayout!.rowCount * (ROW_H + ROW_GAP) + LANE_BOTTOM_GAP;
                 }
             }
@@ -844,6 +924,7 @@ export default function AlignmentCanvas({ gene, records, exonIndexById, locked, 
 
                 ctx.fillStyle = "#a3b8d8";
                 ctx.fillRect(x1, rowY, Math.max(1, x2 - x1), GENE_ROW_H);
+                drawStrandArrows(ctx, x1, x2, rowY, GENE_ROW_H, g.strand, pxFrom, pxTo);
 
                 ctx.fillStyle = "#ffffff";
                 ctx.fillRect(0, rowY - 1, marginL - 2, GENE_ROW_H + 2);
@@ -856,7 +937,63 @@ export default function AlignmentCanvas({ gene, records, exonIndexById, locked, 
         }
 
         hitRectsRef.current = hitRects;
-    }, [effectiveView, records, gene, transcripts, overlappingGenes, marginL, width, geneStart0, collapsedIds, mergedExons, displayPeaks]);
+    }, [effectiveView, records, selectedGeneRecords, gene, transcripts, overlappingGenes, marginL, width, geneStart0, laneViewModes, mergedExons, ownPeaks, selectedRead]);
+
+    // Paint after every render so a track redraw also restores the ruler, while mouse
+    // movement alone only redraws this small strip rather than all the reads.
+    useEffect(() => {
+        const ctx = canvasRef.current?.getContext("2d");
+        if (!ctx) return;
+        const right = width - MARGIN_R;
+        ctx.save();
+        ctx.clearRect(0, 0, width, 25);
+        ctx.strokeStyle = "#d7dbe0";
+        ctx.fillStyle = "#6b7280";
+        ctx.font = "11px -apple-system, sans-serif";
+        ctx.beginPath();
+        ctx.moveTo(marginL, 20.5);
+        ctx.lineTo(right, 20.5);
+        ctx.stroke();
+        ctx.fillText(Math.round(effectiveView.start + 1).toLocaleString(), marginL, 14);
+        const endLabel = Math.round(effectiveView.end).toLocaleString();
+        ctx.fillText(endLabel, right - ctx.measureText(endLabel).width, 14);
+
+        if (mouseX !== null && mouseX >= marginL && mouseX <= right) {
+            const fraction = (mouseX - marginL) / (right - marginL);
+            const viewSpan = effectiveView.end - effectiveView.start;
+            const pxPerBase = (right - marginL) / viewSpan;
+            // Bases occupy zero-based, half-open intervals; label them one-based.
+            // At the right endpoint, keep highlighting the last visible base.
+            const baseStart = Math.min(
+                Math.floor(effectiveView.start + fraction * viewSpan),
+                Math.ceil(effectiveView.end) - 1,
+            );
+            const position = baseStart + 1;
+            const baseLeft = marginL + (baseStart - effectiveView.start) * pxPerBase;
+            const left = Math.max(marginL, baseLeft);
+            const rightEdge = Math.min(right, baseLeft + pxPerBase);
+            const labelCenter = pxPerBase > 1 ? (left + rightEdge) / 2 : mouseX;
+            const label = position.toLocaleString();
+            const labelWidth = ctx.measureText(label).width;
+            const labelX = Math.max(marginL, Math.min(right - labelWidth, labelCenter - labelWidth / 2));
+            // Keep the moving label legible when it meets either endpoint label.
+            ctx.fillStyle = "#ffffff";
+            ctx.fillRect(labelX - 3, 1, labelWidth + 6, 16);
+            ctx.fillStyle = "#0e7490";
+            ctx.fillText(label, labelX, 14);
+            if (pxPerBase > 1) {
+                ctx.fillStyle = "rgba(14, 116, 144, 0.3)";
+                ctx.fillRect(left, 17, rightEdge - left, 7);
+            } else {
+                ctx.strokeStyle = "#0e7490";
+                ctx.beginPath();
+                ctx.moveTo(mouseX, 17);
+                ctx.lineTo(mouseX, 24);
+                ctx.stroke();
+            }
+        }
+        ctx.restore();
+    });
 
     // ---- tooltip positioning: flip to stay inside the viewport ----
     useLayoutEffect(() => {
@@ -873,16 +1010,26 @@ export default function AlignmentCanvas({ gene, records, exonIndexById, locked, 
 
     function handleWheel(evt: WheelEvent) {
         // Trackpad two-finger scroll fires plain wheel events indistinguishable from a mouse
-        // wheel except by gesture; only pinch-to-zoom (ctrlKey) or an explicit modifier zooms.
-        // A plain scroll passes through so the panel's own vertical scrollbar handles it -
-        // otherwise scrolling through a tall track (many transcripts/variants) fights with zoom.
-        if (!evt.ctrlKey && !evt.metaKey) return;
+        // wheel except by gesture. A plain scroll passes through so the panel's own vertical
+        // scrollbar handles it - otherwise scrolling through a tall track fights with navigation.
+        if (!evt.ctrlKey && !evt.metaKey && !evt.shiftKey) return;
         evt.preventDefault();
-        const rect = (evt.currentTarget as HTMLCanvasElement).getBoundingClientRect();
+        if (evt.shiftKey && !evt.ctrlKey && !evt.metaKey) {
+            const curWidth = effectiveView.end - effectiveView.start;
+            const bpPerPx = curWidth / (width - marginL - MARGIN_R);
+            const deltaPx = evt.deltaX !== 0 ? evt.deltaX : evt.deltaY;
+            const shift = -deltaPx * bpPerPx;
+            const [s, e] = clampView(effectiveView.start + shift, effectiveView.end + shift);
+            updateView({ start: s, end: e });
+            return;
+        }
+
+        const rect = canvasRef.current?.getBoundingClientRect();
+        if (!rect) return;
         const mx = evt.clientX - rect.left;
         const curWidth = effectiveView.end - effectiveView.start;
         const cursorGenomic = effectiveView.start + ((mx - marginL) / (width - marginL - MARGIN_R)) * curWidth;
-        const factor = evt.deltaY > 0 ? 1.25 : 0.8;
+        const factor = evt.deltaY > 0 ? ZOOM_OUT_FACTOR : ZOOM_IN_FACTOR;
         const newWidth = Math.max(MIN_VIEW_BP, Math.min(curWidth * factor, hardEnd0 - hardStart0));
         const ratio = (cursorGenomic - effectiveView.start) / curWidth;
         const newStart = cursorGenomic - ratio * newWidth;
@@ -890,23 +1037,23 @@ export default function AlignmentCanvas({ gene, records, exonIndexById, locked, 
         updateView({ start: s, end: e });
     }
 
-    // React control zooming into each panel
-
+    // Native capture listener is required so preventDefault can suppress browser zoom across
+    // the full scrollable panel body, including the spacer below the canvas.
     const handleWheelRef = useRef(handleWheel);
     handleWheelRef.current = handleWheel;
     useEffect(() => {
-        const canvas = canvasRef.current;
-        if (!canvas) return;
+        const container = containerRef.current;
+        if (!container) return;
+        const panelBody = container.closest<HTMLElement>(".alignment-panel-body");
+        if (!panelBody) return;
 
         function onWheel(evt: WheelEvent) {
             handleWheelRef.current(evt);
         }
 
-        canvas.addEventListener("wheel", onWheel, { passive:false });
-        return () => canvas.removeEventListener("wheel", onWheel);
+        panelBody.addEventListener("wheel", onWheel, { passive: false, capture: true });
+        return () => panelBody.removeEventListener("wheel", onWheel, { capture: true });
     }, []);
-
-    //
 
     // Below this many px of movement between mousedown and mouseup, treat the gesture as a
     // click (show/update the tooltip) rather than a pan.
@@ -920,7 +1067,9 @@ export default function AlignmentCanvas({ gene, records, exonIndexById, locked, 
             (h): h is Extract<HitRect, { kind: "toggle" }> => h.kind === "toggle" && mx >= h.x1 && mx <= h.x2 && my >= h.y1 && my <= h.y2,
         );
         if (toggleHit) {
-            toggleCollapsed(toggleHit.id);
+            setTooltip(null);
+            setSelectedRead(null);
+            cycleLaneView(toggleHit.id);
             return;
         }
         draggingRef.current = { startX: evt.clientX, startY: evt.clientY, view: { ...effectiveView } };
@@ -931,9 +1080,6 @@ export default function AlignmentCanvas({ gene, records, exonIndexById, locked, 
             const dragging = draggingRef.current;
             if (!dragging) return;
             const dx = evt.clientX - dragging.startX;
-            const dy = evt.clientY - dragging.startY;
-            // Once this turns into an actual pan, drop any tooltip left over from a prior click.
-            if (Math.hypot(dx, dy) > CLICK_MOVE_THRESHOLD) setTooltip(null);
             const curWidth = dragging.view.end - dragging.view.start;
             const bpPerPx = curWidth / (width - marginL - MARGIN_R);
             const shift = -dx * bpPerPx;
@@ -954,6 +1100,7 @@ export default function AlignmentCanvas({ gene, records, exonIndexById, locked, 
             const mx = evt.clientX - rect.left;
             const my = evt.clientY - rect.top;
             const hit = hitRectsRef.current.find((h) => mx >= h.x1 && mx <= h.x2 && my >= h.y1 && my <= h.y2);
+            setSelectedRead(hit?.kind === "read" ? hit.read : null);
             setTooltip(hit && hit.kind !== "toggle" ? { hit, x: evt.clientX, y: evt.clientY } : null);
         }
         window.addEventListener("mousemove", onMove);
@@ -969,79 +1116,92 @@ export default function AlignmentCanvas({ gene, records, exonIndexById, locked, 
         updateView({ start: hardStart0, end: hardEnd0 });
     }
 
-    // Tooltip content is click-driven (see onUp above) - this only tracks the hover cursor
-    // (pointer over a toggle) so mousemove doesn't make the tooltip flicker as it crosses
-    // between adjacent hit rects.
-    function handleMouseMove(evt: React.MouseEvent<HTMLCanvasElement>) {
-        if (draggingRef.current) return;
-        const rect = evt.currentTarget.getBoundingClientRect();
+    // Tooltip content is click-driven; movement updates the ruler and hover cursor.
+    function handleMouseMove(evt: React.MouseEvent<HTMLCanvasElement | HTMLDivElement>) {
+        const rect = canvasRef.current?.getBoundingClientRect();
+        if (!rect) return;
         const mx = evt.clientX - rect.left;
+        setMouseX(mx);
+        if (draggingRef.current) return;
         const my = evt.clientY - rect.top;
         const hit = hitRectsRef.current.find((h) => mx >= h.x1 && mx <= h.x2 && my >= h.y1 && my <= h.y2);
         setHoverToggle(hit?.kind === "toggle");
     }
 
-    // Left/Right arrows pan; Ctrl/Cmd+Left/Right zoom out/in. Up/Down are swallowed here too -
-    // left unhandled, the browser's default action for an unhandled arrow key on a focused
-    // element can shift focus onward to the next focusable element (e.g. the next panel's BAM
-    // picker <select>, which then treats Up/Down as "change selected option"), so every arrow
-    // key needs an explicit preventDefault while this canvas has focus, not just the ones we act on.
+    // Left/Right pan by a small fixed fraction of the current view. Up/Down use the same zoom
+    // factors as Ctrl/Cmd+scroll, centered on the current view.
     function handleCanvasKeyDown(evt: React.KeyboardEvent<HTMLCanvasElement>) {
         if (evt.key !== "ArrowRight" && evt.key !== "ArrowLeft" && evt.key !== "ArrowUp" && evt.key !== "ArrowDown") return;
         evt.preventDefault();
 
-        if (evt.key === "ArrowUp" || evt.key === "ArrowDown") return;
-
-        const zoom = evt.ctrlKey || evt.metaKey;
-        const forward = evt.key === "ArrowRight";
-
-        if (zoom) {
+        if (evt.key === "ArrowUp" || evt.key === "ArrowDown") {
             const curWidth = effectiveView.end - effectiveView.start;
-            setViewWidth(curWidth * (forward ? 0.8 : 1.2));
+            setViewWidth(curWidth * (evt.key === "ArrowUp" ? ZOOM_IN_FACTOR : ZOOM_OUT_FACTOR));
         } else {
-            panByFraction(forward ? 0.25 : -0.25);
+            panByFraction(evt.key === "ArrowRight" ? -KEYBOARD_PAN_FRACTION : KEYBOARD_PAN_FRACTION);
         }
     }
-
-    const curViewWidth = effectiveView.end - effectiveView.start;
-    const matchedZoomLevel = ZOOM_LEVELS.find((lvl) =>
-        lvl.bp === null ? curViewWidth === hardEnd0 - hardStart0 : Math.abs(curViewWidth - lvl.bp) < 1,
-    );
 
     return (
         <div id="plot-container" ref={containerRef}>
             <div className="plot-toolbar">
                 <select
-                    className="zoom-select"
-                    value={matchedZoomLevel ? (matchedZoomLevel.bp ?? "") : "custom"}
-                    onChange={(e) => setViewWidth(e.target.value === "" ? hardEnd0 - hardStart0 : Number(e.target.value))}
+                    className="transcript-sort-select"
+                    value={transcriptSortMode}
+                    aria-label="Transcript order"
+                    title="Vertical transcript order"
+                    onChange={(e) => onTranscriptSortModeChange(e.target.value as TranscriptSortMode)}
                 >
-                    {ZOOM_LEVELS.map((lvl) => (
-                        <option key={lvl.label} value={lvl.bp ?? ""}>{lvl.label}</option>
-                    ))}
-                    {!matchedZoomLevel && <option value="custom">Custom</option>}
+                    <option value="name">Sort by name</option>
+                    <option value="readCount">Sort by assigned reads</option>
                 </select>
-                <button type="button" className="pan-btn" title="Pan left by 75% of the visible range" onClick={() => panByFraction(-0.75)}>◀</button>
-                <button type="button" className="pan-btn" title="Pan right by 75% of the visible range" onClick={() => panByFraction(0.75)}>▶</button>
-                <span className="plot-hint">ctrl/⌘+scroll or ←/→ to zoom · drag or click+←/→ to pan · double-click to reset</span>
+                <label className="minimum-read-filter">
+                    Min reads
+                    <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={minimumReadCount}
+                        onChange={(e) => {
+                            const value = e.currentTarget.valueAsNumber;
+                            onMinimumReadCountChange(Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0);
+                        }}
+                        aria-label="Minimum assigned reads per transcript"
+                    />
+                </label>
+                <span className="plot-hint">ctrl/⌘+scroll or ↑/↓ to zoom · shift+scroll, drag, or ←/→ to pan · double-click to reset</span>
             </div>
 
             <canvas
                 ref={canvasRef}
                 tabIndex={0}
-                // onWheel={handleWheel}
                 onMouseDown={handleMouseDown}
                 onMouseMove={handleMouseMove}
-                onMouseLeave={() => { setTooltip(null); setHoverToggle(false); }}
+                onMouseLeave={() => {
+                    setHoverToggle(false);
+                    setMouseX(null);
+                }}
                 onDoubleClick={handleDoubleClick}
                 style={{ cursor: draggingRef.current ? "grabbing" : hoverToggle ? "pointer" : "default" }}
                 onKeyDown={handleCanvasKeyDown}
             />
 
-            <div className="plot-footer-spacer" />
+            <div
+                className="plot-footer-spacer"
+                onMouseMove={handleMouseMove}
+                onMouseLeave={() => setMouseX(null)}
+            />
 
             {tooltip && (
                 <div id="tooltip" ref={tooltipRef} style={{ display: "block" }}>
+                    <button
+                        type="button"
+                        className="tooltip-close"
+                        aria-label="Close tooltip"
+                        onClick={() => setTooltip(null)}
+                    >
+                        ×
+                    </button>
                     {tooltip.hit.kind === "generegion" && (
                         <>
                             <div><b>{gene.name && gene.name !== gene.id ? gene.name : gene.id}</b> - gene region</div>

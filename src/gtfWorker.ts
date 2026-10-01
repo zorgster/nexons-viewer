@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Oliver Slay and Simon Andrews
+// SPDX-License-Identifier: GPL-3.0-only
+
 // Streams a GTF file line-by-line and builds gene/transcript/exon models without ever
 // holding the raw text in memory - only the parsed result accumulates as the file is read.
 //
@@ -15,6 +18,7 @@
 // annotation entirely.
 import type { ExonGene, ExonTranscript } from "./types";
 import type { GtfWorkerRequest, GtfWorkerResponse } from "./gtfTypes";
+import { Inflate } from "pako";
 
 const GOOD_TAGS = ["MANE_Select", "Ensembl_Canonical", "gencode_primary", "gencode_basic"];
 
@@ -116,7 +120,45 @@ function processExonLine(line: string, state: ParseState) {
     transcript.exons.push([start, end]);
 }
 
-const PROGRESS_INTERVAL = 8 << 20; // report roughly every 8MB of decoded text
+const PROGRESS_INTERVAL = 8 << 20; // report roughly every 8MB of input read
+
+function createPakoGunzipStream(): TransformStream<Uint8Array, Uint8Array> {
+    const inflater = new Inflate();
+
+    return new TransformStream<Uint8Array, Uint8Array>({
+        start(controller) {
+            inflater.onData = (chunk) => {
+                controller.enqueue(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+            };
+        },
+        transform(chunk) {
+            if (!inflater.push(chunk, false) || inflater.err) {
+                throw new Error(inflater.msg || "Invalid gzip data");
+            }
+        },
+        flush() {
+            if (!inflater.push(new Uint8Array(0), true) || inflater.err) {
+                throw new Error(inflater.msg || "Incomplete gzip data");
+            }
+        },
+    });
+}
+
+function streamFileWithProgress(file: File, onProgress: (bytesRead: number) => void): ReadableStream<Uint8Array> {
+    let bytesRead = 0;
+    let lastReported = 0;
+
+    return file.stream().pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+            bytesRead += chunk.byteLength;
+            if (bytesRead - lastReported >= PROGRESS_INTERVAL || bytesRead === file.size) {
+                onProgress(bytesRead);
+                lastReported = bytesRead;
+            }
+            controller.enqueue(chunk);
+        },
+    }));
+}
 
 async function parseGtf(
     file: File,
@@ -125,30 +167,40 @@ async function parseGtf(
     onGenes: (genes: ExonGene[]) => void,
 ): Promise<number> {
     const state: ParseState = { maxTsl, genesById: new Map(), transcriptsById: new Map() };
-    const reader = file.stream().pipeThrough(new TextDecoderStream()).getReader();
+    const isGzipped = /\.gz$/i.test(file.name);
+    let byteStream = streamFileWithProgress(file, onProgress);
+    if (isGzipped) {
+        // DOM typings use the broader BufferSource type for native stream inputs, while
+        // Blob.stream() yields Uint8Array chunks. The runtime stream types are compatible.
+        byteStream = typeof DecompressionStream !== "undefined"
+            ? byteStream.pipeThrough(
+                new DecompressionStream("gzip") as unknown as TransformStream<Uint8Array, Uint8Array>,
+            )
+            : byteStream.pipeThrough(createPakoGunzipStream());
+    }
+    const reader = byteStream.pipeThrough(
+        new TextDecoderStream() as unknown as TransformStream<Uint8Array, string>,
+    ).getReader();
     let buffer = "";
-    let bytesRead = 0;
-    let lastReported = 0;
 
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        bytesRead += value.length;
-        buffer += value;
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += value;
 
-        let newlineIdx = buffer.indexOf("\n");
-        while (newlineIdx !== -1) {
-            let line = buffer.slice(0, newlineIdx);
-            if (line.endsWith("\r")) line = line.slice(0, -1);
-            processExonLine(line, state);
-            buffer = buffer.slice(newlineIdx + 1);
-            newlineIdx = buffer.indexOf("\n");
+            let newlineIdx = buffer.indexOf("\n");
+            while (newlineIdx !== -1) {
+                let line = buffer.slice(0, newlineIdx);
+                if (line.endsWith("\r")) line = line.slice(0, -1);
+                processExonLine(line, state);
+                buffer = buffer.slice(newlineIdx + 1);
+                newlineIdx = buffer.indexOf("\n");
+            }
         }
-
-        if (bytesRead - lastReported > PROGRESS_INTERVAL) {
-            onProgress(bytesRead);
-            lastReported = bytesRead;
-        }
+    } catch (err) {
+        if (isGzipped) throw new Error(`Could not decompress gzip GTF: ${(err as Error).message}`);
+        throw err;
     }
     if (buffer.length > 0) processExonLine(buffer, state);
 

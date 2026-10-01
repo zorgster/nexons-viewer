@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Oliver Slay and Simon Andrews
+// SPDX-License-Identifier: GPL-3.0-only
+
 // BAM/BGZF/BAI utilities: indexed, on-demand region queries against a local
 // BAM + BAI file pair, no server involved. Runs on the main thread - each
 // region query only decompresses a handful of BGZF blocks (KBs, not the

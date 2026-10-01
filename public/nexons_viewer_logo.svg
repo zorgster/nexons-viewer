@@ -2,13 +2,13 @@
 <!-- Created with Inkscape (http://www.inkscape.org/) -->
 
 <svg
-   width="200"
+   width="900"
    height="200"
-   viewBox="0 0 52.916664 52.916665"
+   viewBox="0 0 238.12499 52.916665"
    version="1.1"
    id="svg1"
    inkscape:version="1.4.4 (dcaf3e7, 2026-05-05)"
-   sodipodi:docname="favicon.svg"
+   sodipodi:docname="nexons_viewer_logo.svg"
    xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
    xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
    xmlns="http://www.w3.org/2000/svg"
@@ -24,13 +24,13 @@
      inkscape:deskcolor="#d1d1d1"
      inkscape:document-units="mm"
      showguides="true"
-     inkscape:zoom="0.19888292"
-     inkscape:cx="-1883.0174"
-     inkscape:cy="962.87805"
-     inkscape:window-width="1920"
-     inkscape:window-height="1009"
-     inkscape:window-x="-8"
-     inkscape:window-y="-8"
+     inkscape:zoom="1.1250517"
+     inkscape:cx="472.86714"
+     inkscape:cy="192.4356"
+     inkscape:window-width="1904"
+     inkscape:window-height="1041"
+     inkscape:window-x="-3"
+     inkscape:window-y="5"
      inkscape:window-maximized="1"
      inkscape:current-layer="g28"
      showgrid="false" />
@@ -95,18 +95,61 @@
        id="g28"
        transform="translate(-37.783601,-21.777559)">
       <g
-         id="g1"
-         transform="translate(6.909676,-2.8110282)">
-        <path
-           d="M 62.235325,66.482658 H 59.952091 L 50.010508,39.10763 V 66.482658 H 46.894844 V 29.261182 h 2.473504 l 9.751313,26.899354 V 29.261182 h 3.115664 z"
-           id="text1"
-           style="font-size:48.709px;font-family:'Agency FB';-inkscape-font-specification:'Agency FB, Normal';stroke-width:4.05907"
-           transform="translate(-3.6753237)"
-           aria-label="N exons viewer"
-           sodipodi:nodetypes="ccccccccccc" />
+         id="g2"
+         transform="translate(-3.6753237)">
+        <text
+           xml:space="preserve"
+           style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:48.709px;font-family:'Agency FB';-inkscape-font-specification:'Agency FB, Normal';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;text-align:start;writing-mode:lr-tb;direction:ltr;text-anchor:start;fill:#000000;stroke-width:4.05907"
+           x="43.921883"
+           y="66.482658"
+           id="text1"><tspan
+             sodipodi:role="line"
+             id="tspan1"
+             style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:48.709px;font-family:'Agency FB';-inkscape-font-specification:'Agency FB, Normal';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;stroke-width:4.05907"
+             x="43.921883"
+             y="66.482658">N exons viewer</tspan></text>
+        <g
+           id="g1"
+           transform="matrix(2.3527698,0,0,1,-104.62841,0)">
+          <rect
+             style="fill:#666666;stroke-width:0.263344"
+             id="rect1"
+             width="21.899748"
+             height="9.3152132"
+             x="77.343834"
+             y="29.253384" />
+          <rect
+             style="fill:#666666;stroke-width:0.192967"
+             id="rect2"
+             width="11.758718"
+             height="9.3152132"
+             x="107.94504"
+             y="29.253384" />
+          <rect
+             style="fill:#666666;stroke-width:0.288807"
+             id="rect3"
+             width="26.339529"
+             height="9.3152132"
+             x="134.6245"
+             y="29.253384" />
+          <path
+             id="path3"
+             style="fill:none;stroke:#666666;stroke-width:1;stroke-dasharray:none"
+             inkscape:transform-center-y="-1.3419514"
+             d="m 98.827535,38.315473 2.387295,-4.025844 2.38731,-4.025848 2.3873,4.025848 2.38733,4.025844"
+             sodipodi:nodetypes="ccccc"
+             inkscape:transform-center-x="-2.1602185e-06" />
+          <path
+             id="path5"
+             style="fill:none;stroke:#666666;stroke-width:1;stroke-dasharray:none"
+             inkscape:transform-center-y="-1.4269839"
+             d="m 119.32787,38.23335 3.91719,-4.280945 3.91726,-4.280948 3.91723,4.280948 3.91723,4.280945"
+             sodipodi:nodetypes="ccccc"
+             inkscape:transform-center-x="-9.1805614e-06" />
+        </g>
         <g
            id="g24"
-           transform="matrix(0.75932221,0,0,0.94110391,50.474807,7.7635441)"
+           transform="matrix(0.75932221,0,0,0.94110391,54.150131,7.7635441)"
            style="stroke-width:1.18295;stroke-dasharray:none">
           <g
              id="g27"
